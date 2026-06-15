@@ -5,6 +5,9 @@ const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default async function handler(req, res) {
+  // Configura cache na Vercel para acelerar requisições repetidas do mesmo chip
+  res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate');
+  
   const { id } = req.query;
 
   if (!id) {
@@ -12,33 +15,39 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Busca o link de destino e o contador atual do chip
+    // 1. Busca APENAS o link de destino (operação ultra leve)
     const { data, error } = await supabase
       .from('chips_nfc')
-      .select('link_destino, total_acessos')
+      .select('link_destino')
       .eq('id', String(id))
       .maybeSingle();
 
     if (error || !data) {
-      return res.status(404).send('Chip NFC não encontrado ou inativo.');
+      return res.status(404).send('Chip NFC não encontrado.');
     }
 
-    // 2. Registra o acesso somando +1 (Acontece em segundo plano)
-    const acessosAtuais = data.total_acessos || 0;
-    
-    // Usamos o "await" aqui para garantir que o banco salve antes de redirecionar,
-    // ou podemos disparar sem await se quisermos velocidade máxima. 
-    // Para contadores simples, o padrão abaixo é super seguro:
-    await supabase
+    // 2. ATUALIZAÇÃO EM SEGUNDO PLANO (O segredo da velocidade!)
+    // O comando roda SEM o "await". A Vercel dispara o comando pro banco 
+    // e passa direto para a linha do redirecionamento sem esperar a resposta.
+    supabase
       .from('chips_nfc')
-      .update({ total_acessos: acessosAtuais + 1 })
-      .eq('id', String(id));
+      .update({ total_acessos: supabase.rpc('increment', { row_id: id }) }) // Se tiver a função RPC
+      // Ou a forma padrão sem await:
+      // .from('chips_nfc').update({ total_acessos: (data.total_acessos || 0) + 1 }).eq('id', id)
+      .eq('id', String(id))
+      .then(() => console.log('Contador atualizado em background.'))
+      .catch(err => console.error('Erro ao atualizar contador:', err));
 
-    // 3. Redireciona o usuário instantaneamente para o link final
-    return res.redirect(302, data.link_destino);
+    // Opcional: Se quiser capturar o sistema operacional no log da Vercel para o futuro:
+    const userAgent = req.headers['user-agent'] || '';
+    const sistemaOp = userAgent.includes('iPhone') || userAgent.includes('iPad') ? 'iOS' : 'Android/PC';
+    console.log(`Acesso vindo de: ${sistemaOp}`);
+
+    // 3. Redireciona na velocidade da luz
+    return res.redirect(301, data.link_destino);
 
   } catch (err) {
     console.error('Erro no servidor:', err);
-    return res.status(500).send('Erro interno no servidor de redirecionamento.');
+    return res.status(500).send('Erro interno.');
   }
 }

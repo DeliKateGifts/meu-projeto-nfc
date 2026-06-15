@@ -5,7 +5,7 @@ const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default async function handler(req, res) {
-  // Configura cache na Vercel para acelerar requisições repetidas do mesmo chip
+  // Configura cache na Vercel para acelerar as requisições
   res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate');
   
   const { id } = req.query;
@@ -15,10 +15,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Busca APENAS o link de destino (operação ultra leve)
+    // 1. Busca os dados atuais do chip (link e contadores)
     const { data, error } = await supabase
       .from('chips_nfc')
-      .select('link_destino')
+      .select('link_destino, total_acessos, acessos_ios, acessos_android')
       .eq('id', String(id))
       .maybeSingle();
 
@@ -26,25 +26,29 @@ export default async function handler(req, res) {
       return res.status(404).send('Chip NFC não encontrado.');
     }
 
-    // 2. ATUALIZAÇÃO EM SEGUNDO PLANO (O segredo da velocidade!)
-    // O comando roda SEM o "await". A Vercel dispara o comando pro banco 
-    // e passa direto para a linha do redirecionamento sem esperar a resposta.
+    // 2. Descobre o Sistema Operacional pelo User-Agent
+    const userAgent = req.headers['user-agent'] || '';
+    let updateData = {
+      total_acessos: (data.total_acessos || 0) + 1
+    };
+
+    if (userAgent.includes('iPhone') || userAgent.includes('iPad') || userAgent.includes('Macintosh')) {
+      updateData.acessos_ios = (data.acessos_ios || 0) + 1;
+    } else if (userAgent.includes('Android')) {
+      updateData.acessos_android = (data.acessos_android || 0) + 1;
+    }
+
+    // 3. ATUALIZAÇÃO EM SEGUNDO PLANO (Não trava o usuário!)
+    // O código dispara a atualização para o banco e passa direto para o redirect
     supabase
       .from('chips_nfc')
-      .update({ total_acessos: supabase.rpc('increment', { row_id: id }) }) // Se tiver a função RPC
-      // Ou a forma padrão sem await:
-      // .from('chips_nfc').update({ total_acessos: (data.total_acessos || 0) + 1 }).eq('id', id)
+      .update(updateData)
       .eq('id', String(id))
-      .then(() => console.log('Contador atualizado em background.'))
-      .catch(err => console.error('Erro ao atualizar contador:', err));
+      .then(() => console.log('Contadores atualizados com sucesso.'))
+      .catch(err => console.error('Erro ao atualizar contadores:', err));
 
-    // Opcional: Se quiser capturar o sistema operacional no log da Vercel para o futuro:
-    const userAgent = req.headers['user-agent'] || '';
-    const sistemaOp = userAgent.includes('iPhone') || userAgent.includes('iPad') ? 'iOS' : 'Android/PC';
-    console.log(`Acesso vindo de: ${sistemaOp}`);
-
-    // 3. Redireciona na velocidade da luz
-    return res.redirect(301, data.link_destino);
+    // 4. Redireciona na velocidade da luz para o destino final
+    return res.redirect(302, data.link_destino);
 
   } catch (err) {
     console.error('Erro no servidor:', err);

@@ -1,40 +1,44 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Inicializa o cliente do Supabase utilizando as variáveis de ambiente da Vercel
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default async function handler(req, res) {
-  // Captura o ID mapeado através da query string definida no vercel.json (?id=:id)
   const { id } = req.query;
 
-  // Validação preventiva para garantir que o ID foi fornecido
   if (!id) {
-    return res.status(400).send('ID do chip NFC não foi identificado na requisição.');
+    return res.status(400).send('ID do chip não fornecido.');
   }
 
   try {
-    // Busca na tabela 'chips_nfc' onde a coluna 'id' seja exatamente igual ao ID da URL
+    // 1. Busca o link de destino e o contador atual do chip
     const { data, error } = await supabase
       .from('chips_nfc')
-      .select('link_destino')
-      .eq('id', String(id).trim()) // .trim() remove espaços acidentais
-      .maybeSingle(); // Evita lançar exceptions caso o registro não exista
+      .select('link_destino, total_acessos')
+      .eq('id', String(id))
+      .maybeSingle();
 
-    // Se houver falha de conexão/banco ou se o registro retornar vazio
     if (error || !data) {
-      console.error("Erro no Supabase ou registro inexistente:", error);
-      return res.status(404).send('Este produto NFC ainda não foi configurado no sistema.');
+      return res.status(404).send('Chip NFC não encontrado ou inativo.');
     }
 
-    // Registro encontrado com sucesso! Executa o redirecionamento HTTP 302
+    // 2. Registra o acesso somando +1 (Acontece em segundo plano)
+    const acessosAtuais = data.total_acessos || 0;
+    
+    // Usamos o "await" aqui para garantir que o banco salve antes de redirecionar,
+    // ou podemos disparar sem await se quisermos velocidade máxima. 
+    // Para contadores simples, o padrão abaixo é super seguro:
+    await supabase
+      .from('chips_nfc')
+      .update({ total_acessos: acessosAtuais + 1 })
+      .eq('id', String(id));
+
+    // 3. Redireciona o usuário instantaneamente para o link final
     return res.redirect(302, data.link_destino);
 
   } catch (err) {
-    // Captura falhas inesperadas de infraestrutura ou código
-    console.error("Erro interno no handler:", err);
-    return res.status(500).send('Erro interno no servidor: ' + err.message);
+    console.error('Erro no servidor:', err);
+    return res.status(500).send('Erro interno no servidor de redirecionamento.');
   }
 }
